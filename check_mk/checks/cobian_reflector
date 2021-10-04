@@ -1,0 +1,284 @@
+#!/usr/bin/python
+
+# Author: Matthias Maderer
+# E-Mail: edvler@edvler-blog.de
+# URL: https://github.com/edvler/
+# License: GPLv2
+
+
+
+# Example agent output
+# <<<cobian_reflector>>>
+#    2021-10-01 11:06:19 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:06:20  ** Backup for task "EDV DOKU" ended. Number of backed up files: 4. Created folders: 0. Backup size: 41,6 KB. **
+#    2021-10-01 11:06:20 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:06:21 The backup has ended without errors.
+#    2021-10-01 11:20:58 Backing up the task "Test"
+#    2021-10-01 11:20:59 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:21:33  ** Backup for task "Test" ended. Number of backed up files: 1. Created folders: 0. Backup size: 322,97 MB. **
+#    2021-10-01 11:21:33 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:21:34 The backup has ended without errors.
+#    2021-10-01 11:26:14 Backing up the task "EDV DOKU"
+#    2021-10-01 11:26:15 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:26:15  ** Backup for task "EDV DOKU" ended. Number of backed up files: 4. Created folders: 0. Backup size: 41,6 KB. **
+#    2021-10-01 11:26:15 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:26:16 Backing up the task "Test"
+#    2021-10-01 11:26:16 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:26:49  ** Backup for task "Test" ended. Number of backed up files: 1. Created folders: 0. Backup size: 322,97 MB. **
+#    2021-10-01 11:26:49 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:26:49 The backup has ended without errors.
+#    2021-10-01 11:27:48 Backing up the task "EDV DOKU"
+#    2021-10-01 11:27:48 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:27:48  ** Backup for task "EDV DOKU" ended. Number of backed up files: 4. Created folders: 0. Backup size: 41,6 KB. **
+#    2021-10-01 11:27:49 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:27:49 The backup has ended without errors.
+#    2021-10-01 11:28:53 Backing up the task "Test"
+#    2021-10-01 11:28:53 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:29:28  ** Backup for task "Test" ended. Number of backed up files: 2. Created folders: 0. Backup size: 322,97 MB. **
+#    2021-10-01 11:29:28 The Volume Shadow Copy image has been successfully deleted.
+#    2021-10-01 11:29:28 The backup has ended without errors.
+#    2021-10-01 11:30:15 Backing up the task "Test"
+#    2021-10-01 11:30:15 The Volume Shadow Copy image has been successfully created.
+#    2021-10-01 11:30:49  ** Backup for task "Test" ended. Number of backed up files: 1. Created folders: 0. Backup size: 322,97 MB. **
+#    2021-10-01 11:30:49 The Volume Shadow Copy image has been successfully deleted.
+
+cobian_reflector_default_levels = {'check_backup': 'check', 'backup_age': (93600, 108000), 'backup_duration': (18000, 21600), 'ignore_vss': 'check', 'error_check': 'crit', 'backup_minsize': (0,0), 'file_count_limits': (0,0)}
+
+def get_task_name(line):
+    task_name = ""
+    if line[2] == 'Backing' and line[3] == 'up' and line[4] == 'the' and line[5] == 'task':
+        task_name_begin_index=6
+        while task_name_begin_index < len(line):
+            task_name += line[task_name_begin_index] + ' '
+            task_name_begin_index += 1
+
+        task_name = task_name.replace('"', '').strip()
+
+    return task_name
+def inventory_cobian_reflector(info):
+    tasks = []
+    for line in info:
+            task_parse=get_task_name(line)
+            if (task_parse != ""):
+               task_name = task_parse.replace('"', '')
+               tasks.append(task_name)
+
+    distinct_tasks = list(set(tasks))
+    for task in distinct_tasks:
+        yield (
+         'Task ' + task, 'cobian_reflector_default_levels')
+
+
+def check_cobian_reflector(item, params, info):
+    if params['check_backup'] == 'ignore':
+         yield 0, 'Check disabled by rule'
+
+    task = item.replace('Task ', '')
+
+
+    # find the date and time of current (newest) backup
+    backup_dates = dict()
+
+    # Add each start line of the task to array
+    for line in info:
+         task_parse=get_task_name(line)
+         if task_parse == task:
+            if task not in backup_dates:
+               backup_dates[task] = [line[0] + line[1]]
+            else:
+               backup_dates[task].append(line[0] + line[1])
+
+
+   # Check if task was found in logs, if not exit.
+    if task not in backup_dates:
+        yield 2, 'Task not found in Backup logs.'
+        return
+
+    # Get the current log date
+    backup_dates[task].sort(key=lambda x: time.mktime(time.strptime(x,'%Y-%m-%d%H:%M:%S')),reverse=True)
+
+    start_datetime=getDateFromString(backup_dates[task][0])
+    end_datetime=""
+    vss_create_status=1 # 1 = error, 0 = ok
+    vss_delete_status=1 # 1 = error, 0 = ok
+    job_errors=-1 # 0 = ok
+    folders_created=0
+    file_count=0
+    backup_size=0
+    backup_size_text=""
+    c=0
+
+    # Get logs of current task
+    for line in info:
+        # Search for current starting line
+        task_parse=get_task_name(line)
+        if line[0] + line[1] == backup_dates[task][0] and task_parse == task:
+            c=1
+
+        # If start of log found, parse items
+        if c>0:
+            if c==2: # VSS created
+                if line[len(line)-2] + ' ' + line[len(line)-1] == "successfully created.":
+                    vss_create_status=0
+            if c==4: # VSS deleted
+                if line[len(line)-2] + ' ' + line[len(line)-1] == "successfully deleted.":
+                    vss_delete_status=0
+            if c==3: # Backup Infos
+                #if line[2] == '**' and line[3] == 'Backup' and line[4] == 'done':
+                if line[2] + ' ' + line[3] + ' ' + line[4] + ' ' + line[5] == "** Backup for task":
+                    file_count=int(line[len(line)-9].replace('.',''))
+                    folders_created=int(line[len(line)-6].replace('.',''))
+                    end_datetime=getDateFromString(line[0] + line[1])
+                    sizenum=line[len(line)-3]
+                    sizeunit=line[len(line)-2].replace('.','')
+                    backup_size=to_byte(float(sizenum.replace(',','.')),sizeunit)
+                    backup_size_text=sizenum + sizeunit
+            if c==5:
+                if (len(line) == 8) and  (line[2] + ' ' + line[3] + ' ' + line[4] + ' ' + line[5] + ' ' + line[6] + ' ' + line[7]== "The backup has ended without errors."):
+                    job_errors=0
+                else:
+                    job_errors=1
+
+            c=c+1
+
+        # Log is expected to be 4 lines long
+        if c==6:
+            break
+
+    ###### GENERATE OUTPUTS
+
+    # Check if backup is running
+    backup_age = time.time() - time.mktime(start_datetime)
+
+    warn_backup_duration, critical_backup_duration = params['backup_duration']
+    warn_backup_age, critical_backup_age = params['backup_age'] # params from wato
+
+    perfdata = [( "backup_age", int(backup_age), warn_backup_age, critical_backup_age )]
+
+    if end_datetime == "":
+        if backup_age < warn_backup_duration:
+            yield 0,'Backup currently running. Starttime: ' + format_time(start_datetime), perfdata
+            return
+        if backup_age >= warn_backup_duration and backup_age < critical_backup_duration:
+            yield 1,'Backup not finished yet! Starttime: ' + format_time(start_datetime), perfdata
+            return
+        if backup_age >= critical_backup_duration:
+            yield 2,'Backup not finished yet! Starttime: ' + format_time(start_datetime), perfdata
+            return
+
+    # Output backup age
+    duration=time.mktime(end_datetime)-time.mktime(start_datetime)
+    backup_age_line = 'Last Backup: ' + format_time(end_datetime) + ' (Age: ' + pretty_time_delta(backup_age) + ', warn/crit at ' + pretty_time_delta(warn_backup_age) + '/' + pretty_time_delta(critical_backup_age) + ')'
+
+    perfdata.append(("job_duration", duration, warn_backup_duration, critical_backup_duration))
+
+    if backup_age < warn_backup_age:
+         yield 0, backup_age_line
+    if backup_age >= warn_backup_age and backup_age < critical_backup_age:
+         yield 1, backup_age_line
+    if backup_age >= critical_backup_age:
+         yield 2, backup_age_line
+
+    # Output VSS status
+    if params['ignore_vss'] == 'check':
+        if vss_create_status == 0 and vss_delete_status == 0:
+            yield 0, "No VSS errors"
+        else:
+            yield 2, "VSS erros found!"
+    else:
+        yield 0, "VSS errors not checked!"
+
+    # Output job errors
+    error_check = params['error_check']
+
+    if error_check == 'ignore' or job_errors == 0:
+        yield 0, "Backup errors not checked!"
+    elif error_check == 'warn':
+        yield 1, "Backup errors found. Check logfile!"
+    elif error_check == 'crit':
+        yield 2, "Backup errors found. Check logfile!"
+
+    # Output file count errors
+    warn_file_count, error_file_count = params['file_count_limits']
+    backup_error_text = "Backup file count: " + str(file_count) + " (warn/crit < " + str(warn_file_count) + "/" + str(error_file_count) + ")"
+
+    perfdata.append(("file_count", int(file_count), int(warn_file_count), int(error_file_count)))
+
+    if file_count >= warn_file_count:
+        yield 0, backup_error_text
+    elif file_count < warn_file_count and file_count > error_file_count:
+        yield 1, backup_error_text
+    elif file_count <= error_file_count:
+        yield 2, backup_error_text
+
+    # Output backup size errors
+    warn_size_limit, critical_size_limit = params['backup_minsize']
+    backup_error_text = "Backup size: " + backup_size_text + " (warn/crit < " + str(warn_size_limit) + "/" + str(critical_size_limit) + ")"
+
+    perfdata.append(("backup_size", backup_size, warn_size_limit, critical_size_limit))
+    perfdata.append(("folders_created", folders_created))
+
+    if backup_size >= warn_size_limit:
+        yield 0, backup_error_text, perfdata
+    elif backup_size < warn_size_limit and backup_size > critical_size_limit:
+        yield 1, backup_error_text, perfdata
+    elif backup_size <= critical_size_limit:
+        yield 2, backup_error_text, perfdata
+
+check_info['cobian_reflector'] = {
+   'check_function': check_cobian_reflector,
+   'inventory_function': inventory_cobian_reflector,
+   'service_description': 'Cobian Reflector %s',
+   'group': 'cobian_ref',
+   'has_perfdata': True
+}
+
+def getDateFromString(datetime_string):
+    try:
+        d = time.strptime(datetime_string, '%Y-%m-%d%H:%M:%S')
+        return d
+    except ValueError:
+        return
+
+    return
+
+def format_time(timeobject):
+    return time.strftime("%Y-%m-%d %H:%M", timeobject)
+
+def pretty_time_delta(seconds):
+    sign_string = '-' if seconds < 0 else ''
+    seconds = abs(int(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days > 0:
+        return '%s%d days %d hours %d minutes' % (sign_string, days, hours, minutes)
+    if hours > 0:
+        return '%s%d hours %d minutes' % (sign_string, hours, minutes)
+    if minutes > 0:
+        return '%s%d minutes' % (sign_string, minutes)
+    return '0 minutes'
+
+def to_byte(sizenum, size_unit):
+    size_cal=0
+    if size_unit == "TB":
+        size_cal = sizenum*1024*1024*1024*1024
+    if size_unit == "GB":
+        size_cal = sizenum*1024*1024*1024
+    if size_unit == "MB":
+        size_cal = sizenum*1024*1024
+    if size_unit == "KB":
+        size_cal = sizenum*1024
+    if size_unit == "TiB":
+        size_cal = sizenum*1000*1000*1000*1000
+    if size_unit == "GiB":
+        size_cal = sizenum*1000*1000*1000
+    if size_unit == "MiB":
+        size_cal = sizenum*1000*1000
+    if size_unit == "KiB":
+        size_cal = sizenum*1000
+
+    if size_unit == "bytes":
+        size_cal = sizenum
+    return size_cal
+

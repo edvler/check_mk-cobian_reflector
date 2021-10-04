@@ -1,0 +1,14 @@
+title: Plugin to check Cobian Reflector status 
+agents: windows
+author: Matthias Maderer <edvler@edvler-blog.de>
+license: GPLv2
+distribution: check_mk
+description:
+ This check parses the logfile of Cobian Reflector.
+
+ {Installation:}
+ https://github.com/edvler/check_mk-cobian_reflector
+
+ 
+inventory:
+ One service is created for each backup task in Cobian Reflector
